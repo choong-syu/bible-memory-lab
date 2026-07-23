@@ -2,72 +2,10 @@ import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { getSession } from "@/lib/auth";
 import { hashPassword, logActivity, mutateDb, readDb } from "@/lib/store";
-import type { Database, QuizOptions, SelectionRef } from "@/lib/types";
+import type { QuizOptions, SelectionRef } from "@/lib/types";
 
 const normalize = (value: string) => value.replace(/[\s.,!?~·'"“”‘’()]/g, "").toLowerCase();
 const safeSelections = (value: unknown): SelectionRef[] => Array.isArray(value) ? value.filter((item) => item && typeof item.key === "string" && typeof item.surface === "string") : [];
-
-function mergeImportedDatabase(target: Database, source: Database) {
-  const userIdMap = new Map<string, string>();
-  const historyIdMap = new Map<string, string>();
-  const quizIdMap = new Map<string, string>();
-
-  for (const importedUser of source.users || []) {
-    const existing = target.users.find((user) => user.username.toLowerCase() === importedUser.username.toLowerCase());
-    if (existing) {
-      userIdMap.set(importedUser.id, existing.id);
-      if (!existing.lastLoginAt || (importedUser.lastLoginAt && importedUser.lastLoginAt > existing.lastLoginAt)) {
-        existing.lastLoginAt = importedUser.lastLoginAt;
-      }
-    } else {
-      target.users.push(importedUser);
-      userIdMap.set(importedUser.id, importedUser.id);
-    }
-  }
-
-  const mappedUserId = (id: string) => userIdMap.get(id) || id;
-  const appendById = <T extends { id: string }>(items: T[], item: T) => {
-    if (!items.some((existing) => existing.id === item.id)) items.push(item);
-  };
-
-  for (const item of source.activities || []) appendById(target.activities, { ...item, userId: mappedUserId(item.userId) });
-  for (const item of source.drafts || []) {
-    const mapped = { ...item, userId: mappedUserId(item.userId) };
-    const existing = target.drafts.find((draft) => draft.userId === mapped.userId && draft.bookCode === mapped.bookCode && draft.chapter === mapped.chapter);
-    if (!existing) target.drafts.push(mapped);
-    else if (mapped.updatedAt > existing.updatedAt) Object.assign(existing, mapped);
-  }
-  for (const item of source.selectionHistories || []) {
-    const existing = target.selectionHistories.find((history) => history.id === item.id);
-    historyIdMap.set(item.id, existing?.id || item.id);
-    if (!existing) target.selectionHistories.push({ ...item, userId: mappedUserId(item.userId) });
-  }
-  for (const item of source.quizzes || []) {
-    const existing = target.quizzes.find((quiz) => quiz.id === item.id);
-    quizIdMap.set(item.id, existing?.id || item.id);
-    if (!existing) target.quizzes.push({
-      ...item,
-      userId: mappedUserId(item.userId),
-      sourceHistoryId: item.sourceHistoryId ? historyIdMap.get(item.sourceHistoryId) || item.sourceHistoryId : undefined,
-    });
-  }
-  for (const item of source.attempts || []) appendById(target.attempts, {
-    ...item,
-    userId: mappedUserId(item.userId),
-    quizId: quizIdMap.get(item.quizId) || item.quizId,
-  });
-  for (const item of source.wrongNotes || []) appendById(target.wrongNotes, { ...item, userId: mappedUserId(item.userId) });
-
-  return {
-    users: target.users.length,
-    activities: target.activities.length,
-    drafts: target.drafts.length,
-    selectionHistories: target.selectionHistories.length,
-    quizzes: target.quizzes.length,
-    attempts: target.attempts.length,
-    wrongNotes: target.wrongNotes.length,
-  };
-}
 
 export async function POST(request: Request) {
   const session = await getSession();
@@ -75,16 +13,8 @@ export async function POST(request: Request) {
   const body = await request.json();
   const action = String(body.action || "");
 
-  if (action === "adminOverview" || action === "adminResetPassword" || action === "adminImportData") {
+  if (action === "adminOverview" || action === "adminResetPassword") {
     if (session.role !== "admin") return NextResponse.json({ error: "관리자 권한이 필요합니다." }, { status: 403 });
-    if (action === "adminImportData") {
-      const source = body.database as Database;
-      if (!source || !Array.isArray(source.users) || !Array.isArray(source.selectionHistories)) {
-        return NextResponse.json({ error: "올바른 데이터 파일이 아닙니다." }, { status: 400 });
-      }
-      const counts = await mutateDb((db) => mergeImportedDatabase(db, source));
-      return NextResponse.json({ ok: true, counts });
-    }
     if (action === "adminResetPassword") {
       const password = String(body.password || "");
       if (password.length < 4) return NextResponse.json({ error: "새 비밀번호는 4자 이상이어야 합니다." }, { status: 400 });
