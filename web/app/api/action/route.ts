@@ -1,11 +1,48 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { getSession } from "@/lib/auth";
 import { hashPassword, logActivity, mutateDb, readDb } from "@/lib/store";
-import type { QuizOptions, SelectionRef } from "@/lib/types";
+import type { Attempt, Database, QuizOptions, SelectionRef } from "@/lib/types";
 
 const normalize = (value: string) => value.replace(/[\s.,!?~·'"“”‘’()]/g, "").toLowerCase();
 const safeSelections = (value: unknown): SelectionRef[] => Array.isArray(value) ? value.filter((item) => item && typeof item.key === "string" && typeof item.surface === "string") : [];
+
+function wrongSelections(db: Database, attempt: Attempt) {
+  const quiz = db.quizzes.find((item) => item.id === attempt.quizId);
+  if (!quiz) return [];
+  return quiz.selections.filter((selection) => normalize(String(attempt.answers[selection.key] || "")) !== normalize(selection.surface));
+}
+
+function wrongReviews(db: Database, userId: string) {
+  return db.attempts
+    .filter((attempt) => attempt.userId === userId)
+    .map((attempt) => {
+      const quiz = db.quizzes.find((item) => item.id === attempt.quizId);
+      const selections = wrongSelections(db, attempt);
+      return {
+        id: attempt.id,
+        quizId: attempt.quizId,
+        title: quiz?.title || "빈칸문제",
+        bookName: quiz?.bookName || selections[0]?.bookName || "",
+        chapter: quiz?.chapter || selections[0]?.chapter,
+        answers: attempt.answers,
+        selections,
+        correct: attempt.correct,
+        total: attempt.total,
+        createdAt: attempt.createdAt,
+      };
+    })
+    .filter((review) => review.selections.length > 0)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+let bibleCache: any;
+async function bibleSource() {
+  if (!bibleCache) bibleCache = JSON.parse(await readFile(path.join(process.cwd(), "public", "bible-verses.json"), "utf8"));
+  return bibleCache;
+}
 
 export async function POST(request: Request) {
   const session = await getSession();
@@ -13,8 +50,40 @@ export async function POST(request: Request) {
   const body = await request.json();
   const action = String(body.action || "");
 
-  if (action === "adminOverview" || action === "adminResetPassword") {
+  if (action === "adminOverview" || action === "adminResetPassword" || action === "adminAddNoun" || action === "adminDeleteNoun") {
     if (session.role !== "admin") return NextResponse.json({ error: "관리자 권한이 필요합니다." }, { status: 403 });
+    if (action === "adminAddNoun") {
+      const bookCode = String(body.bookCode || "");
+      const chapter = Number(body.chapter);
+      const verse = Number(body.verse);
+      const surface = String(body.surface || "").trim();
+      const source = await bibleSource();
+      const book = source.books.find((item: any) => item.bookCode === bookCode);
+      const chapterData = book?.chapters.find((item: any) => item.chapter === chapter);
+      const verseData = chapterData?.verses.find((item: any) => item.verse === verse);
+      if (!verseData || !surface) return NextResponse.json({ error: "장절과 추가할 명사를 확인해 주세요." }, { status: 400 });
+      const requestedStart = Number.isInteger(Number(body.start)) ? Number(body.start) : -1;
+      const start = requestedStart >= 0 && verseData.text.slice(requestedStart, requestedStart + surface.length) === surface
+        ? requestedStart
+        : verseData.text.indexOf(surface);
+      if (start < 0) return NextResponse.json({ error: "해당 절에서 입력한 단어를 찾을 수 없습니다." }, { status: 400 });
+      const overlaps = (noun: any) => start < noun.start + noun.length && noun.start < start + surface.length;
+      if (verseData.nouns.some(overlaps)) return NextResponse.json({ error: "이미 명사로 선택할 수 있는 영역입니다." }, { status: 400 });
+      const noun = await mutateDb((db) => {
+        db.nounOverrides ||= [];
+        if (db.nounOverrides.some((item) => item.bookCode === bookCode && item.chapter === chapter && item.verse === verse && overlaps(item))) {
+          throw new Error("이미 관리자가 추가한 명사와 겹칩니다.");
+        }
+        const item = { id: randomUUID(), bookCode, chapter, verse, start, length: surface.length, surface, createdAt: new Date().toISOString() };
+        db.nounOverrides.push(item);
+        return item;
+      });
+      return NextResponse.json({ noun });
+    }
+    if (action === "adminDeleteNoun") {
+      await mutateDb((db) => { db.nounOverrides = (db.nounOverrides || []).filter((item) => item.id !== body.id); });
+      return NextResponse.json({ ok: true });
+    }
     if (action === "adminResetPassword") {
       const password = String(body.password || "");
       if (password.length < 4) return NextResponse.json({ error: "새 비밀번호는 4자 이상이어야 합니다." }, { status: 400 });
@@ -34,10 +103,14 @@ export async function POST(request: Request) {
         selections: db.selectionHistories.filter((item) => item.userId === user.id).length,
         quizzes: db.quizzes.filter((item) => item.userId === user.id).length,
         attempts: db.attempts.filter((item) => item.userId === user.id).length,
-        wrongs: db.wrongNotes.filter((item) => item.userId === user.id && item.wrongCount > item.correctCount).length,
+        wrongs: wrongReviews(db, user.id).length,
       },
     }));
-    return NextResponse.json({ users, activities: db.activities.slice(0, 500).map((item) => ({ ...item, user: db.users.find((user) => user.id === item.userId)?.username || "알 수 없음" })) });
+    return NextResponse.json({
+      users,
+      activities: db.activities.slice(0, 500).map((item) => ({ ...item, user: db.users.find((user) => user.id === item.userId)?.username || "알 수 없음" })),
+      nounOverrides: db.nounOverrides || [],
+    });
   }
 
   if (session.role !== "user") return NextResponse.json({ error: "일반 사용자 기능입니다." }, { status: 403 });
@@ -50,7 +123,7 @@ export async function POST(request: Request) {
       histories: db.selectionHistories.filter((item) => item.userId === userId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
       quizzes: db.quizzes.filter((item) => item.userId === userId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
       attempts: db.attempts.filter((item) => item.userId === userId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-      wrongNotes: db.wrongNotes.filter((item) => item.userId === userId).sort((a, b) => b.lastWrongAt.localeCompare(a.lastWrongAt)),
+      wrongNotes: wrongReviews(db, userId),
     });
   }
 
@@ -80,7 +153,7 @@ export async function POST(request: Request) {
   if (action === "createQuiz" || action === "createWrongQuiz") {
     const dbSnapshot = await readDb();
     const selections = action === "createWrongQuiz"
-      ? dbSnapshot.wrongNotes.filter((item) => item.userId === userId && (body.ids || []).includes(item.id)).map(({ id, userId: _, wrongCount, correctCount, lastWrongAnswer, firstWrongAt, lastWrongAt, lastCorrectAt, ...selection }) => selection)
+      ? wrongReviews(dbSnapshot, userId).filter((item) => (body.ids || []).includes(item.id)).flatMap((item) => item.selections)
       : safeSelections(body.selections);
     if (!selections.length) return NextResponse.json({ error: "출제할 명사가 없습니다." }, { status: 400 });
     const options: QuizOptions = { firstLetter: Boolean(body.options?.firstLetter), stars: Boolean(body.options?.stars) };

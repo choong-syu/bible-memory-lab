@@ -74,6 +74,17 @@ export type WrongNote = SelectionRef & {
   lastCorrectAt?: string;
 };
 
+export type NounOverride = {
+  id: string;
+  bookCode: string;
+  chapter: number;
+  verse: number;
+  start: number;
+  length: number;
+  surface: string;
+  createdAt: string;
+};
+
 export type Draft = {
   userId: string;
   bookCode: string;
@@ -90,4 +101,5 @@ export type Database = {
   quizzes: Quiz[];
   attempts: Attempt[];
   wrongNotes: WrongNote[];
+  nounOverrides?: NounOverride[];
 };

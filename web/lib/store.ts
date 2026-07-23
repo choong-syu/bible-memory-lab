@@ -5,7 +5,7 @@ import postgres from "postgres";
 import type { Activity, Database } from "./types";
 
 const emptyDb = (): Database => ({
-  users: [], activities: [], drafts: [], selectionHistories: [], quizzes: [], attempts: [], wrongNotes: [],
+  users: [], activities: [], drafts: [], selectionHistories: [], quizzes: [], attempts: [], wrongNotes: [], nounOverrides: [],
 });
 
 const dataDir = process.env.DATA_DIR || path.join(process.cwd(), "data");

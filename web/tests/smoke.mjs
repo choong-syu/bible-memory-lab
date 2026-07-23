@@ -27,10 +27,17 @@ const quiz = await post("/api/action", { action: "createQuiz", title: "Smoke qui
 const answers = Object.fromEntries(selections.map((item) => [item.key, item.surface]));
 answers[selections[0].key] = "wrong";
 const attempt = await post("/api/action", { action: "submitAttempt", quizId: quiz.data.quiz.id, answers }, registered.cookie);
+const dashboard = await post("/api/action", { action: "dashboard" }, registered.cookie);
 const admin = await post("/api/auth", { action: "adminLogin", password: "bible" });
 const overview = await post("/api/action", { action: "adminOverview" }, admin.cookie);
+const addedNoun = await post("/api/action", { action: "adminAddNoun", bookCode: "Mk", chapter: 1, verse: 9, surface: "그", start: 0 }, admin.cookie);
+const chapterWithOverrideResponse = await fetch(`${base}/api/bible?book=Mk&chapter=1`, { headers: { cookie: registered.cookie } });
+const chapterWithOverride = await chapterWithOverrideResponse.json();
+await post("/api/action", { action: "adminDeleteNoun", id: addedNoun.data.noun.id }, admin.cookie);
 
 if (!history.data.history.id || !quiz.data.quiz.id) throw new Error("History or quiz was not created");
 if (attempt.data.attempt.correct !== 4 || attempt.data.attempt.total !== 5) throw new Error("Unexpected score");
+if (dashboard.data.wrongNotes.length !== 1 || dashboard.data.wrongNotes[0].selections.length !== 1) throw new Error("Wrong review was not grouped by quiz attempt");
 if (!overview.data.users.some((user) => user.username === username)) throw new Error("Admin cannot see user");
-console.log(JSON.stringify({ nouns: selections.map((item) => item.surface), score: "4/5", adminUserVisible: true }));
+if (!chapterWithOverride.verses[8].nouns.some((noun) => noun.overrideId === addedNoun.data.noun.id)) throw new Error("Admin noun override is not selectable");
+console.log(JSON.stringify({ nouns: selections.map((item) => item.surface), score: "4/5", wrongReviewGrouped: true, adminNounOverride: true, adminUserVisible: true }));
